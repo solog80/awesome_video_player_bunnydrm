@@ -34,6 +34,7 @@ import java.util.HashMap
 class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
     private val videoPlayers = LongSparseArray<BetterPlayer>()
     private val dataSources = LongSparseArray<Map<String, Any?>>()
+    private var nextPlayerId = 0L
     private var flutterState: FlutterState? = null
     private var currentNotificationTextureId: Long = -1
     private var currentNotificationDataSource: Map<String, Any?>? = null
@@ -61,6 +62,10 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
             binding.textureRegistry
         )
         flutterState?.startListening(this)
+        binding.platformViewRegistry.registerViewFactory(
+            NATIVE_SURFACE_VIEW_TYPE,
+            NativeSurfaceViewFactory(this)
+        )
     }
 
 
@@ -92,6 +97,15 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
         dataSources.clear()
     }
 
+    /** Called by [NativeSurfaceViewFactory] to get the ExoPlayer for a player id. */
+    fun getExoPlayer(textureId: Long): androidx.media3.exoplayer.ExoPlayer? =
+        videoPlayers[textureId]?.getExoPlayer()
+
+    /** Called by [NativeSurfaceViewFactory] when the platform SurfaceView is destroyed. */
+    fun detachSurface(textureId: Long) {
+        videoPlayers[textureId]?.setVideoSurface(null)
+    }
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         if (flutterState == null || flutterState?.textureRegistry == null) {
             result.error("no_activity", "better_player plugin requires a foreground activity", null)
@@ -100,9 +114,12 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
         when (call.method) {
             INIT_METHOD -> disposeAllPlayers()
             CREATE_METHOD -> {
-                val handle = flutterState!!.textureRegistry!!.createSurfaceTexture()
+                // No texture/surface is created here — the video renders through a
+                // native SurfaceView PlatformView (see NativeSurfaceViewFactory) so
+                // that L1 secure Widevine frames can be displayed.
+                val id = nextPlayerId++
                 val eventChannel = EventChannel(
-                    flutterState?.binaryMessenger, EVENTS_CHANNEL + handle.id()
+                    flutterState?.binaryMessenger, EVENTS_CHANNEL + id
                 )
                 var customDefaultLoadControl: CustomDefaultLoadControl? = null
                 if (call.hasArgument(MIN_BUFFER_MS) && call.hasArgument(MAX_BUFFER_MS) &&
@@ -117,10 +134,10 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
                     )
                 }
                 val player = BetterPlayer(
-                    flutterState?.applicationContext!!, eventChannel, handle,
+                    flutterState?.applicationContext!!, eventChannel, id,
                     customDefaultLoadControl, result
                 )
-                videoPlayers.put(handle.id(), player)
+                videoPlayers.put(id.toLong(), player)
             }
 
             PRE_CACHE_METHOD -> preCache(call, result)
@@ -512,6 +529,7 @@ class BetterPlayerPlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
         private const val TAG = "BetterPlayerPlugin"
         private const val CHANNEL = "better_player_channel"
         private const val EVENTS_CHANNEL = "better_player_channel/videoEvents"
+        const val NATIVE_SURFACE_VIEW_TYPE = "better_player/native_surface"
         private const val DATA_SOURCE_PARAMETER = "dataSource"
         private const val KEY_PARAMETER = "key"
         private const val HEADERS_PARAMETER = "headers"

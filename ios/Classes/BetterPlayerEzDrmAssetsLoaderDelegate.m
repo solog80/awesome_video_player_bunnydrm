@@ -11,14 +11,96 @@
     NSString *_libraryId;
 }
 
-- (instancetype)init:(NSURL *)certificateURL withLicenseURL:(NSURL *)licenseURL headers:(NSDictionary *)headers videoId:(NSString *)videoId libraryId:(NSString *)libraryId {
+- (instancetype)init:(NSURL *)certificateURL withLicenseURL:(NSURL *)licenseURL {
     self = [super init];
-    _certificateURL = certificateURL;
-    _licenseURL = licenseURL;
-    _headers = headers;
-    _videoId = videoId;
-    _libraryId = libraryId;
+    if (self) {
+        _certificateURL = certificateURL;
+        _licenseURL = licenseURL;
+        
+        // Extract videoId and libraryId from URL if possible
+        [self extractIdsFromURL:licenseURL];
+    }
     return self;
+}
+
+- (void)extractIdsFromURL:(NSURL *)url {
+    NSString *path = url.path;
+    NSArray *components = [path componentsSeparatedByString:@"/"];
+    
+    // Extract libraryId and videoId from path like /FairPlayLicense/571008/72ee526e...
+    if ([path containsString:@"FairPlayLicense"]) {
+        for (int i = 0; i < components.count; i++) {
+            if ([components[i] isEqualToString:@"FairPlayLicense"] && i + 2 < components.count) {
+                _libraryId = components[i + 1];
+                _videoId = components[i + 2];
+                NSLog(@"Extracted libraryId: %@, videoId: %@", _libraryId, _videoId);
+                break;
+            }
+        }
+    }
+}
+
+/*------------------------------------------
+ **
+ ** getCertificateData
+ **
+ ** Fetch certificate from server using NSURLSession
+ ** ---------------------------------------*/
+- (NSData *)getCertificateData:(NSError **)errorOut {
+    NSLog(@"Fetching certificate from: %@", _certificateURL.absoluteString);
+    
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSData *certificateData = nil;
+    __block NSError *requestError = nil;
+    
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:_certificateURL];
+    [request setHTTPMethod:@"GET"];
+    [request setTimeoutInterval:30.0];
+    
+    // Add headers if available
+    if (_headers) {
+        for (NSString *key in _headers) {
+            [request setValue:_headers[key] forHTTPHeaderField:key];
+        }
+    }
+    
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            requestError = error;
+            NSLog(@"Certificate request error: %@", error);
+        } else if (data) {
+            NSString *responseString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSLog(@"Certificate response: %@", responseString);
+            
+            // Try to parse as JSON
+            NSError *jsonError;
+            NSDictionary *jsonResponse = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+            
+            if (!jsonError && jsonResponse) {
+                NSString *certBase64 = jsonResponse[@"certificate"];
+                if (certBase64 && [certBase64 isKindOfClass:[NSString class]]) {
+                    certificateData = [[NSData alloc] initWithBase64EncodedString:certBase64 options:0];
+                    if (certificateData) {
+                        NSLog(@"Successfully parsed certificate from JSON: %lu bytes", (unsigned long)certificateData.length);
+                    }
+                }
+            } else {
+                // Assume raw certificate
+                certificateData = data;
+                NSLog(@"Assuming raw certificate data: %lu bytes", (unsigned long)certificateData.length);
+            }
+        }
+        dispatch_semaphore_signal(semaphore);
+    }];
+    
+    [task resume];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    if (errorOut && requestError) {
+        *errorOut = requestError;
+    }
+    
+    return certificateData;
 }
 
 /*------------------------------------------
@@ -29,24 +111,26 @@
  ** Returns CKC from JSON response.
  ** ---------------------------------------*/
 - (NSData *)getContentKeyFromLicenseServerWithRequest:(NSData*)requestBytes error:(NSError **)errorOut {
-    NSData *responseData;
-    NSURLResponse *response;
+    NSLog(@"Sending license request...");
     
     // Determine license URL
-    NSURL *finalLicenseURL;
-    if (_licenseURL != nil && ![_licenseURL isEqual:[NSNull null]]) {
-        finalLicenseURL = _licenseURL;
-    } else if (_videoId != nil && _libraryId != nil) {
-        // Construct BunnyCDN URL format
+    NSURL *licenseURL = _licenseURL;
+    if (!licenseURL && _videoId && _libraryId) {
         NSString *urlString = [NSString stringWithFormat:@"https://video.bunnycdn.com/FairPlayLicense/%@/%@", _libraryId, _videoId];
-        finalLicenseURL = [NSURL URLWithString:urlString];
-        NSLog(@"Constructed BunnyCDN license URL: %@", urlString);
-    } else {
+        licenseURL = [NSURL URLWithString:urlString];
+        NSLog(@"Constructed license URL: %@", urlString);
+    }
+    
+    if (!licenseURL) {
         if (errorOut) {
-            *errorOut = [NSError errorWithDomain:@"FairPlay" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No license URL or videoId/libraryId provided"}];
+            *errorOut = [NSError errorWithDomain:@"FairPlay" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No license URL available"}];
         }
         return nil;
     }
+    
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSData *responseData = nil;
+    __block NSError *requestError = nil;
     
     // Prepare JSON request body with base64 SPC
     NSString *spcBase64 = [requestBytes base64EncodedStringWithOptions:0];
@@ -56,131 +140,100 @@
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:requestBody options:0 error:&jsonError];
     
     if (jsonError) {
-        NSLog(@"Failed to serialize JSON: %@", jsonError);
         if (errorOut) *errorOut = jsonError;
         return nil;
     }
     
-    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:finalLicenseURL];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:licenseURL];
     [request setHTTPMethod:@"POST"];
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setHTTPBody:jsonData];
+    [request setTimeoutInterval:30.0];
     
-    // Add custom headers
-    if (_headers) {
-        for (NSString *key in _headers) {
-            NSString *value = _headers[key];
-            [request setValue:value forHTTPHeaderField:key];
-        }
-    }
+    // Debug log
+    NSString *requestBodyString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    NSLog(@"Sending license request to: %@", licenseURL.absoluteString);
+    NSLog(@"Request body: %@", requestBodyString);
     
-    NSLog(@"Sending license request to: %@", finalLicenseURL.absoluteString);
-    
-    // Use synchronous request (keeps compatibility with original code)
-    @try {
-        responseData = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:errorOut];
-        
-        if (responseData) {
-            // Debug: Log response
-            NSString *responseString = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
-            NSLog(@"License server response: %@", responseString);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error) {
+            requestError = error;
+            NSLog(@"License request error: %@", error);
+        } else if (data) {
+            NSString *responseString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            NSLog(@"License server response (%lu bytes): %@", (unsigned long)data.length, responseString);
             
-            // Parse JSON response
-            NSError *parseError;
-            NSDictionary *jsonResponse = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&parseError];
-            
-            if (!parseError && jsonResponse) {
-                NSString *ckcBase64 = jsonResponse[@"ckc"];
-                if (ckcBase64 && [ckcBase64 isKindOfClass:[NSString class]]) {
-                    // Decode base64 CKC
-                    NSData *ckcData = [[NSData alloc] initWithBase64EncodedString:ckcBase64 options:0];
-                    if (ckcData) {
-                        NSLog(@"Successfully parsed CKC: %lu bytes", (unsigned long)ckcData.length);
-                        return ckcData;
-                    } else {
-                        NSLog(@"Failed to decode base64 CKC");
-                    }
-                } else if (jsonResponse[@"error"]) {
-                    NSLog(@"License server error: %@", jsonResponse[@"error"]);
+            // Check HTTP status code
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+                NSLog(@"HTTP status code: %ld", (long)httpResponse.statusCode);
+                
+                if (httpResponse.statusCode != 200) {
+                    requestError = [NSError errorWithDomain:@"FairPlay" 
+                                                       code:httpResponse.statusCode 
+                                                   userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Server returned status %ld", (long)httpResponse.statusCode]}];
                 }
-            } else {
-                // If not JSON, assume raw CKC
-                NSLog(@"Response is not JSON, assuming raw CKC: %lu bytes", (unsigned long)responseData.length);
-                return responseData;
             }
+            
+            if (!requestError) {
+                // Parse JSON response
+                NSError *parseError;
+                NSDictionary *jsonResponse = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
+                
+                if (!parseError && jsonResponse) {
+                    NSString *ckcBase64 = jsonResponse[@"ckc"];
+                    if (ckcBase64 && [ckcBase64 isKindOfClass:[NSString class]]) {
+                        responseData = [[NSData alloc] initWithBase64EncodedString:ckcBase64 options:0];
+                        if (responseData) {
+                            NSLog(@"Successfully parsed CKC: %lu bytes", (unsigned long)responseData.length);
+                        } else {
+                            NSLog(@"Failed to decode base64 CKC");
+                        }
+                    } else if (jsonResponse[@"error"]) {
+                        NSLog(@"License server error: %@", jsonResponse[@"error"]);
+                    }
+                } else {
+                    // If not JSON, assume raw CKC
+                    responseData = data;
+                    NSLog(@"Assuming raw CKC: %lu bytes", (unsigned long)responseData.length);
+                }
+            }
+        } else {
+            NSLog(@"No data received from license server");
         }
-    }
-    @catch (NSException* excp) {
-        NSLog(@"Exception in license request: %@", excp);
-        if (errorOut) {
-            *errorOut = [NSError errorWithDomain:@"FairPlay" code:-1 userInfo:@{NSLocalizedDescriptionKey: excp.reason}];
-        }
+        dispatch_semaphore_signal(semaphore);
+    }];
+    
+    [task resume];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    
+    if (errorOut && requestError) {
+        *errorOut = requestError;
     }
     
-    return nil;
+    return responseData;
 }
 
 /*------------------------------------------
  **
  ** getAppCertificate
  **
- ** Returns the app certificate from BunnyCDN
- ** BunnyCDN returns JSON with certificate field
+ ** Returns the app certificate
  ** ---------------------------------------*/
 - (NSData *)getAppCertificate:(NSString *)assetId error:(NSError **)errorOut {
-    NSData *certificateData;
-    
-    @try {
-        // Fetch certificate data
-        certificateData = [NSData dataWithContentsOfURL:_certificateURL options:0 error:errorOut];
-        
-        if (certificateData) {
-            // Debug: Log response
-            NSString *responseString = [[NSString alloc] initWithData:certificateData encoding:NSUTF8StringEncoding];
-            NSLog(@"Certificate response: %@", responseString);
-            
-            // Try to parse as JSON
-            NSError *parseError;
-            NSDictionary *jsonResponse = [NSJSONSerialization JSONObjectWithData:certificateData options:0 error:&parseError];
-            
-            if (!parseError && jsonResponse) {
-                NSString *certBase64 = jsonResponse[@"certificate"];
-                if (certBase64 && [certBase64 isKindOfClass:[NSString class]]) {
-                    // Decode base64 certificate
-                    NSData *decodedCert = [[NSData alloc] initWithBase64EncodedString:certBase64 options:0];
-                    if (decodedCert) {
-                        NSLog(@"Successfully parsed certificate from JSON: %lu bytes", (unsigned long)decodedCert.length);
-                        return decodedCert;
-                    }
-                }
-            }
-            
-            // If not JSON, assume raw certificate
-            NSLog(@"Assuming raw certificate data: %lu bytes", (unsigned long)certificateData.length);
-            return certificateData;
-        }
-    }
-    @catch (NSException* excp) {
-        NSLog(@"Exception getting certificate: %@", excp);
-        if (errorOut) {
-            *errorOut = [NSError errorWithDomain:@"FairPlay" code:-1 userInfo:@{NSLocalizedDescriptionKey: excp.reason}];
-        }
-    }
-    
-    return nil;
+    return [self getCertificateData:errorOut];
 }
 
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
     NSURL *assetURI = loadingRequest.request.URL;
     NSString *str = assetURI.absoluteString;
-    
-    // Extract assetId from skd:// URL
     NSString *scheme = assetURI.scheme;
+    
     if (![scheme isEqualToString:@"skd"]) {
         return NO;
     }
     
-    // Extract assetId (last 36 chars or use videoId if available)
+    // Extract assetId
     if (str.length >= 36) {
         _assetId = [str substringFromIndex:str.length - 36];
     } else {

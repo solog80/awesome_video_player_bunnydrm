@@ -5,6 +5,8 @@ import 'dart:async';
 import 'package:awesome_video_player/src/configuration/better_player_buffering_configuration.dart';
 import 'package:awesome_video_player/src/core/better_player_utils.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'video_player_platform_interface.dart';
@@ -382,6 +384,33 @@ class MethodChannelVideoPlayer extends VideoPlayerPlatform {
         viewType: 'com.jhomlala/better_player',
         creationParamsCodec: const StandardMessageCodec(),
         creationParams: {'textureId': textureId!},
+      );
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      // Render through a native media3 PlayerView embedded as an AndroidView.
+      // L1 secure Widevine frames cannot be captured into a Flutter texture
+      // (VirtualDisplay → green/black screen), so we use the hybrid-composition
+      // (direct surface layer) path which can carry USAGE_SECURE surfaces.
+      return PlatformViewLink(
+        key: ValueKey<String>('better_player_native_surface_$textureId'),
+        viewType: 'better_player/native_surface',
+        surfaceFactory: (BuildContext context, PlatformViewController controller) {
+          return AndroidViewSurface(
+            controller: controller as AndroidViewController,
+            gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+            hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+          );
+        },
+        onCreatePlatformView: (PlatformViewCreationParams params) {
+          return PlatformViewsService.initSurfaceAndroidView(
+            id: params.id,
+            viewType: 'better_player/native_surface',
+            layoutDirection: TextDirection.ltr,
+            creationParams: {'textureId': textureId!},
+            creationParamsCodec: const StandardMessageCodec(),
+            onFocus: () => params.onFocusChanged(true),
+          )..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
+            ..create();
+        },
       );
     } else {
       return Texture(textureId: textureId!);

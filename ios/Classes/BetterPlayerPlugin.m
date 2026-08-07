@@ -20,15 +20,21 @@ BetterPlayer* _notificationPlayer;
 bool _remoteCommandsInitialized = false;
 
 
-#pragma mark - FlutterPlugin protocol
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     FlutterMethodChannel* channel =
     [FlutterMethodChannel methodChannelWithName:@"better_player_channel"
                                 binaryMessenger:[registrar messenger]];
+    
+    FlutterMethodChannel* pipChannel =
+    [FlutterMethodChannel methodChannelWithName:@"com.playitloud/pip"
+                                binaryMessenger:[registrar messenger]];
+                                
     BetterPlayerPlugin* instance = [[BetterPlayerPlugin alloc] initWithRegistrar:registrar];
+    instance.pipChannel = pipChannel;
+    
     [registrar addMethodCallDelegate:instance channel:channel];
-    //[registrar publish:instance];
     [registrar registerViewFactory:instance withId:@"com.jhomlala/better_player"];
+}
 }
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
@@ -290,6 +296,7 @@ bool _remoteCommandsInitialized = false;
         result(nil);
     } else if ([@"create" isEqualToString:call.method]) {
         BetterPlayer* player = [[BetterPlayer alloc] initWithFrame:CGRectZero];
+        player.plugin = self;
         [self onPlayerSetup:player result:result];
     } else {
         NSDictionary* argsMap = call.arguments;

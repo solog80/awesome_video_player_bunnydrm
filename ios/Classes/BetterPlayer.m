@@ -512,15 +512,21 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 }
 
 - (int64_t)duration {
-    CMTime time;
-    if (@available(iOS 13, *)) {
-        time =  [[_player currentItem] duration];
-    } else {
-        time =  [[[_player currentItem] asset] duration];
+- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
+    [self disablePictureInPicture];
+    if (self.plugin && self.plugin.pipChannel) {
+        [self.plugin.pipChannel invokeMethod:@"onPipStop" arguments:nil];
     }
-    if (!CMTIME_IS_INVALID(_player.currentItem.forwardPlaybackEndTime)) {
-        time = [[_player currentItem] forwardPlaybackEndTime];
+}
+
+- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
+    if (_eventSink != nil) {
+        _eventSink(@{@"event" : @"pipStart"});
     }
+    if (self.plugin && self.plugin.pipChannel) {
+        [self.plugin.pipChannel invokeMethod:@"onPipStart" arguments:nil];
+    }
+}
 
     return [BetterPlayerTimeUtils FLTCMTimeToMillis:(time)];
 }

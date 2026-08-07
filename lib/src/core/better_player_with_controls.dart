@@ -187,7 +187,12 @@ class _BetterPlayerVideoFitWidgetState
               child: SizedBox(
                 width: controller!.value.size?.width ?? 0,
                 height: controller!.value.size?.height ?? 0,
-                child: VideoPlayer(controller),
+                child: VideoPlayer(
+                  controller,
+                  key: ValueKey<String>(
+                    'video_player_${controller?.hashCode ?? 0}_${controller?.textureId ?? 0}',
+                  ),
+                ),
               ),
             ),
           ),
